@@ -57,6 +57,11 @@ lazy val analytics =
     .settings(commonSettings: _*)
     .dependsOn(common)
 
+lazy val elasticsearch =
+  project
+    .settings(commonSettings: _*)
+    .dependsOn(common)
+
 lazy val stats =
   project
     .settings(commonSettings: _*)

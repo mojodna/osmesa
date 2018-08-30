@@ -1,0 +1,48 @@
+{
+  "dynamic_templates": [
+    {
+      "tag_values_as_strings": {
+        "path_match": "tags.*",
+        "mapping": {
+          "type": "keyword"
+        }
+      }
+    }
+  ],
+  "properties": {
+    "changeset": {
+      "type": "long"
+    },
+    "wkt": {
+      "type": "geo_shape",
+      "ignore_malformed": true
+    },
+    "guid": {
+      "type": "keyword"
+    },
+    "id": {
+      "type": "long"
+    },
+    "minorVersion": {
+      "type": "long"
+    },
+    "tags": {
+      "type": "object"
+    },
+    "type": {
+      "type": "byte"
+    },
+    "updated": {
+      "type": "date"
+    },
+    "validUntil": {
+      "type": "date"
+    },
+    "version": {
+      "type": "long"
+    },
+    "visible": {
+      "type": "boolean"
+    }
+  }
+}

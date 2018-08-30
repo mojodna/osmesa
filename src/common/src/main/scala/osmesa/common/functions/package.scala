@@ -14,7 +14,7 @@ package object functions {
   // A brief note about style
   // Spark functions are typically defined using snake_case, therefore so are the UDFs
   // internal helper functions use standard Scala naming conventions
-  // spatial functions w/ matching signatures use ST_* for familarity
+  // spatial functions w/ matching signatures use ST_* for familiarity
 
   private def _reproject(geom: Array[Byte], targetCRS: CRS = WebMercator) =
     Option(geom).map(_.readWKB.reproject(LatLng, targetCRS).toWKB(targetCRS.epsgCode.get)).orNull
@@ -61,7 +61,17 @@ package object functions {
   }
 
   val ST_AsText: UserDefinedFunction = udf {
-    Option(_: Array[Byte]).map(_.readWKB.toWKT).getOrElse("")
+    Option(_: Array[Byte]).map(x =>
+      x.readWKB match {
+        case g: Point => g.toWKT
+        case g =>
+          // g.isValid is insufficient
+          g.jtsGeom.buffer(0) match {
+            case geom if geom.isEmpty => null
+            case geom => Geometry(geom).toWKT
+          }
+      }
+    ).orNull
   }
 
   val ST_IsEmpty: UserDefinedFunction = udf {
