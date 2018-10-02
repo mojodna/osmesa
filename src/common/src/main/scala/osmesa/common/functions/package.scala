@@ -99,4 +99,7 @@ package object functions {
   val ST_Transform: UserDefinedFunction = udf {
     _reproject(_: Array[Byte], _: CRS)
   }
+
+  val ST_Intersects: UserDefinedFunction = udf(
+    (a: Array[Byte], b: Array[Byte]) => a.readWKB().intersects(b.readWKB()))
 }

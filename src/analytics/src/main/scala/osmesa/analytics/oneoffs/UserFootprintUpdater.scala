@@ -7,6 +7,7 @@ import cats.implicits._
 import com.monovore.decline._
 import geotrellis.vector.{Feature, Geometry}
 import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
 import osmesa.analytics.{Analytics, Footprints}
 import osmesa.common.ProcessOSM
 import osmesa.common.model._
@@ -104,6 +105,7 @@ object UserFootprintUpdater
 
             val changedNodes = changes
               .where('_type === ProcessOSM.NodeType and 'lat.isNotNull and 'lon.isNotNull)
+              .where(lit(-83.2877) <= 'lon and 'lon <= lit(-82.9105) and lit(42.2555) <= 'lat and 'lat <= lit(42.4502))
               .select('sequence, 'user, 'lat, 'lon)
 
             val tiledNodes =
