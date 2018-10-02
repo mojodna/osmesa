@@ -119,12 +119,12 @@ object UserFootprintUpdater
             val changedNodes = changes
               .where('_type === ProcessOSM.NodeType and 'lat.isNotNull and 'lon.isNotNull)
               .where(lit(-83.2877) <= 'lon and 'lon <= lit(-82.9105) and lit(42.2555) <= 'lat and 'lat <= lit(42.4502))
-              .select('sequence, 'user, 'lat, 'lon)
+              .select('sequence, 'uid, 'lat, 'lon)
 
             val tiledNodes =
               Footprints.updateFootprints(tileSource,
                                           changedNodes
-                                            .withColumnRenamed("user", "key"))
+                                            .withColumnRenamed("uid", "key"))
 
             val query = tiledNodes.writeStream
               .queryName("tiled user footprints")
