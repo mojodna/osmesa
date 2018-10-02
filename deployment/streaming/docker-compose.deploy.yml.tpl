@@ -38,3 +38,24 @@ services:
         awslogs-group: ${AWS_LOG_GROUP}
         awslogs-region: ${AWS_REGION}
         awslogs-stream-prefix: changeset
+  overpass-diff-publisher:
+    image: quay.io/mojodna/overpass-diff-publisher
+    volumes:
+      - ~/.aws:/root/.aws
+    environment:
+      - AWS_PROFILE
+      - OVERPASS_URL=${OVERPASS_URL}
+    command: >
+      ${OVERPASS_AUGDIFF_START} ${AUGDIFF_SOURCE}
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 1s
+        max_attempts: 10
+        window: 120s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${AWS_LOG_GROUP}
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream-prefix: overpass-diff-publisher
