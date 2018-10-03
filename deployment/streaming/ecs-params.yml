@@ -11,4 +11,4 @@ task_definition:
     user-footprint-updater:
       mem_reservation: 4224m
     overpass-diff-publisher:
-      mem_reservation: 512m
+      mem_reservation: 1024m
