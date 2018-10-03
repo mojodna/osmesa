@@ -46,7 +46,7 @@ services:
       - AWS_PROFILE
       - OVERPASS_URL=${OVERPASS_URL}
     command: >
-      ${OVERPASS_AUGDIFF_START} ${AUGDIFF_SOURCE}
+      ${AUGDIFF_SOURCE}
     logging:
       driver: awslogs
       options:
