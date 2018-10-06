@@ -27,7 +27,8 @@ object ProcessOSM {
   lazy val logger: Logger = Logger.getLogger(getClass)
 
   val BareElementSchema = StructType(
-    StructField("changeset", LongType, nullable = false) ::
+    StructField("uid", LongType, nullable = false) ::
+      StructField("changeset", LongType, nullable = false) ::
       StructField("id", LongType, nullable = false) ::
       StructField("version", IntegerType, nullable = false) ::
       StructField("updated", TimestampType, nullable = false) ::
@@ -241,7 +242,7 @@ object ProcessOSM {
 
     ns
       // fetch the last version of a node within a single changeset
-      .select('changeset, 'id, 'version, 'timestamp)
+      .select('uid, 'changeset, 'id, 'version, 'timestamp)
       .groupBy('changeset, 'id)
       .agg(max('version).cast(IntegerType) as 'version, max('timestamp) as 'updated)
       .join(ns.drop('changeset), Seq("id", "version"))
@@ -250,6 +251,7 @@ object ProcessOSM {
         'id,
         ST_Point('lon, 'lat) as 'geom,
         'tags,
+        'uid,
         'changeset,
         'updated,
         'validUntil,
@@ -297,23 +299,23 @@ object ProcessOSM {
     // authorship, join on changesets
     // TODO check on partitioning of nodes (assume that the thing requesting the join gets to keep its partitioning)
     val waysByChangeset = nodes
-      .select('changeset, 'id, 'timestamp as 'updated)
+      .select('uid, 'changeset, 'id, 'timestamp as 'updated)
       .join(nodesToWays, Seq("id"))
       .where('timestamp <= 'updated and 'updated < coalesce('validUntil, current_timestamp))
-      .select('changeset, 'wayId as 'id, 'version, 'updated)
+      .select('uid, 'changeset, 'wayId as 'id, 'version, 'updated)
 
     val allWayVersions = waysByChangeset
       // Union with raw ways to include those in the time line (if they weren't already triggered by node modifications
       // at the same time)
-      .union(ways.select('changeset, 'id, 'version, 'timestamp as 'updated))
+      .union(ways.select('uid, 'changeset, 'id, 'version, 'timestamp as 'updated))
       // If a node and a way were modified within the same changeset at different times, there will be multiple entries
       // per changeset (with different timestamps). There should only be one per changeset.
-      .groupBy('changeset, 'id)
+      .groupBy('uid, 'changeset, 'id)
       .agg(max('version).cast(IntegerType) as 'version, max('updated) as 'updated)
       .join(ways.select('id, 'version, 'nds, 'isArea), Seq("id", "version"))
 
     val explodedWays = allWayVersions
-      .select('changeset, 'id, 'version, 'updated, 'isArea, posexplode_outer('nds) as Seq("idx", "ref"))
+      .select('uid, 'changeset, 'id, 'version, 'updated, 'isArea, posexplode_outer('nds) as Seq("idx", "ref"))
       // repartition including updated timestamp to avoid skew (version is insufficient, as
       // multiple instances may exist with the same version)
       .repartition('id, 'updated)
@@ -325,12 +327,12 @@ object ProcessOSM {
     implicit val encoder: Encoder[Row] = BareElementEncoder
 
     val wayGeoms = waysAndNodes
-      .select('changeset, 'id, 'version, 'updated, 'isArea, 'idx, 'lat, 'lon)
+      .select('uid, 'changeset, 'id, 'version, 'updated, 'isArea, 'idx, 'lat, 'lon)
       .groupByKey(row =>
-        (row.getAs[Long]("changeset"), row.getAs[Long]("id"), row.getAs[Integer]("version"), row.getAs[Timestamp]("updated"))
+        (row.getAs[Long]("uid"), row.getAs[Long]("changeset"), row.getAs[Long]("id"), row.getAs[Integer]("version"), row.getAs[Timestamp]("updated"))
       )
       .mapGroups {
-        case ((changeset, id, version, updated), rows) =>
+        case ((uid, changeset, id, version, updated), rows) =>
           val nds = rows.toVector
 
           val isArea = nds.head.getAs[Boolean]("isArea")
@@ -365,7 +367,7 @@ object ProcessOSM {
               case _ => null
             }
 
-            new GenericRowWithSchema(Array(changeset, id, version, updated, wkb), BareElementSchema): Row
+            new GenericRowWithSchema(Array(uid, changeset, id, version, updated, wkb), BareElementSchema): Row
       }
 
     @transient val idAndVersionByUpdated = Window.partitionBy('id, 'version).orderBy('updated)
@@ -382,6 +384,7 @@ object ProcessOSM {
         'id,
         'geom,
         'tags,
+        'uid,
         'changeset,
         'updated,
         'validUntil,

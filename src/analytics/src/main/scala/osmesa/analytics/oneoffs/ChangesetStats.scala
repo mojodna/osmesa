@@ -20,7 +20,7 @@ object ChangesetStats extends CommandApp(
     val historyOpt =
       Opts.option[String]("history", help = "Location of the History ORC file to process.")
     val changesetsOpt =
-      Opts.option[String]("changesets", help = "Location of the Changesets ORC file to process.")
+      Opts.option[String]("changesets", help = "Location of the Changesets ORC file to process.").orNone
     val outputOpt =
       Opts.option[URI](long = "output", help = "Output URI prefix; trailing / must be included")
 
@@ -296,7 +296,7 @@ object ChangesetStats extends CommandApp(
         .withColumn("shelters_modified",
           when(isBusShelter('tags) and not('version === 1 and 'minorVersion === 0), lit(1))
             .otherwise(lit(0)))
-        .groupBy('changeset)
+        .groupBy('changeset, 'uid)
         .agg(
           sum('road_m_added / 1000) as 'road_km_added,
           sum('road_m_modified / 1000) as 'road_km_modified,
@@ -349,8 +349,8 @@ object ChangesetStats extends CommandApp(
           sum('cycleways_added) as 'cycleways_added,
           sum('cycleways_modified) as 'cycleways_modified,
           sum('shelters_added) as 'shelters_added,
-          sum('shelters_modified) as 'shelters_modified,
-          count_values(flatten(collect_list('countries))) as 'countries
+          sum('shelters_modified) as 'shelters_modified
+//          count_values(flatten(collect_list('countries))) as 'countries
         )
 
       val pointChangesetStats = pointGeoms
@@ -450,7 +450,7 @@ object ChangesetStats extends CommandApp(
         .withColumn("crossings_modified",
           when(isCrossing('tags) and 'version > 1, lit(1))
             .otherwise(lit(0)))
-        .groupBy('changeset)
+        .groupBy('changeset, 'uid)
         .agg(
           sum('pois_added) as 'pois_added,
           sum('pois_modified) as 'pois_modified,
@@ -483,8 +483,8 @@ object ChangesetStats extends CommandApp(
           sum('vending_machines_added) as 'vending_machines_added,
           sum('vending_machines_modified) as 'vending_machines_modified,
           sum('crossings_added) as 'crossings_added,
-          sum('crossings_modified) as 'crossings_modified,
-          count_values(flatten(collect_list('countries))) as 'countries
+          sum('crossings_modified) as 'crossings_modified
+//          count_values(flatten(collect_list('countries))) as 'countries
         )
 
       // coalesce values to deal with nulls introduced by the outer join
@@ -507,7 +507,7 @@ object ChangesetStats extends CommandApp(
         .withColumnRenamed("shelters_modified", "way_shelters_modified")
         .withColumnRenamed("crossings_added", "way_crossings_added")
         .withColumnRenamed("crossings_modified", "way_crossings_modified")
-        .withColumnRenamed("countries", "way_countries")
+//        .withColumnRenamed("countries", "way_countries")
         .join(pointChangesetStats
           .withColumnRenamed("pois_added", "node_pois_added")
           .withColumnRenamed("pois_modified", "node_pois_modified")
@@ -526,9 +526,9 @@ object ChangesetStats extends CommandApp(
           .withColumnRenamed("shelters_added", "node_shelters_added")
           .withColumnRenamed("shelters_modified", "node_shelters_modified")
           .withColumnRenamed("crossings_added", "node_crossings_added")
-          .withColumnRenamed("crossings_modified", "node_crossings_modified")
-          .withColumnRenamed("countries", "node_countries"),
-          Seq("changeset"),
+          .withColumnRenamed("crossings_modified", "node_crossings_modified"),
+//          .withColumnRenamed("countries", "node_countries"),
+          Seq("uid", "changeset"),
           "full_outer")
         .withColumn("road_km_added", coalesce('road_km_added, lit(0)))
         .withColumn("road_km_modified", coalesce('road_km_modified, lit(0)))
@@ -614,7 +614,7 @@ object ChangesetStats extends CommandApp(
           coalesce('way_crossings_added, lit(0)) + coalesce('node_crossings_added, lit(0)))
         .withColumn("crossings_modified",
           coalesce('way_crossings_modified, lit(0)) + coalesce('node_crossings_modified, lit(0)))
-        .withColumn("countries", merge_counts('node_countries, 'way_countries))
+//        .withColumn("countries", merge_counts('node_countries, 'way_countries))
         .drop('way_pois_added)
         .drop('node_pois_added)
         .drop('way_pois_modified)
@@ -651,34 +651,34 @@ object ChangesetStats extends CommandApp(
         .drop('node_crossings_added)
         .drop('way_crossings_modified)
         .drop('node_crossings_modified)
-        .drop('way_countries)
-        .drop('node_countries)
+//        .drop('way_countries)
+//        .drop('node_countries)
 
-      val changesets = spark.read.orc(changesetSource)
-
-      val changesetMetadata = changesets
-        .select(
-          'id as 'changeset,
-          'uid,
-          'user as 'name,
-          'tags.getItem("created_by") as 'editor,
-          'created_at,
-          'closed_at,
-          hashtags('tags) as 'hashtags
-        )
+//      val changesets = spark.read.orc(changesetSource)
+//
+//      val changesetMetadata = changesets
+//        .select(
+//          'id as 'changeset,
+//          'uid,
+//          'user as 'name,
+//          'tags.getItem("created_by") as 'editor,
+//          'created_at,
+//          'closed_at,
+//          hashtags('tags) as 'hashtags
+//        )
 
       val changesetStats = rawChangesetStats
-        .join(changesetMetadata, Seq("changeset"), "left_outer")
+//        .join(changesetMetadata, Seq("changeset"), "left_outer")
         .cache
 
       changesetStats
         .repartition(1)
         .write
         .mode(SaveMode.Overwrite)
-        .orc(output.resolve("changeset-stats").toString)
+        .csv(output.resolve("changeset-stats").toString)
 
       val userStats = changesetStats
-        .groupBy('uid, 'name)
+        .groupBy('uid)
         .agg(
           sum('road_km_added) as 'road_km_added,
           sum('road_km_modified) as 'road_km_modified,
@@ -746,19 +746,19 @@ object ChangesetStats extends CommandApp(
           sum('vending_machines_modified) as 'vending_machines_modified,
           sum('crossings_added) as 'crossings_added,
           sum('crossings_modified) as 'crossings_modified,
-          count('changeset) as 'changeset_count,
+          count('changeset) as 'changeset_count
           // TODO more efficient as a UDAF; even more efficient using mapPartitions
-          count_values(collect_list('editor)) as 'editors,
-          count_values(collect_list(to_date(date_trunc("day", 'created_at)))) as 'edit_times,
-          count_values(flatten(collect_list('hashtags))) as 'hashtags,
-          sum_counts(collect_list('countries)) as 'countries
+//          count_values(collect_list('editor)) as 'editors,
+//          count_values(collect_list(to_date(date_trunc("day", 'created_at)))) as 'edit_times,
+//          count_values(flatten(collect_list('hashtags))) as 'hashtags,
+//          sum_counts(collect_list('countries)) as 'countries
         )
 
       userStats
         .repartition(1)
         .write
         .mode(SaveMode.Overwrite)
-        .orc(output.resolve("user-stats").toString)
+        .csv(output.resolve("user-stats").toString)
 
       spark.stop()
     }
