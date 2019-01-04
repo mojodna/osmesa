@@ -17,8 +17,7 @@ import org.apache.spark.sql.jts.GeometryUDT
 import org.apache.spark.sql.types._
 import org.locationtech.geomesa.spark.jts._
 import osmesa.common.functions.osm._
-import osmesa.common.relations.MultiPolygons
-import osmesa.common.relations.Routes
+import osmesa.common.relations.{MultiPolygons, Routes}
 import osmesa.common.util.Caching
 import spray.json._
 
@@ -215,19 +214,34 @@ object ProcessOSM {
     */
   def constructGeometries(elements: DataFrame): DataFrame = {
     import elements.sparkSession.implicits._
-    val st_pointToGeom = org.apache.spark.sql.functions.udf { pt: jts.Point => pt.asInstanceOf[jts.Geometry] }
+    elements.sparkSession.withJTS
+
+    val st_pointToGeom = org.apache.spark.sql.functions.udf { pt: jts.Point =>
+      pt.asInstanceOf[jts.Geometry]
+    }
 
     val nodes = ProcessOSM.preprocessNodes(elements)
 
-    val nodeGeoms = ProcessOSM.constructPointGeometries(nodes)
+    val nodeGeoms = ProcessOSM
+      .constructPointGeometries(nodes)
       .withColumn("minorVersion", lit(0))
       .withColumn("geom", st_pointToGeom('geom))
+      .withColumn("geometryChanged", lit(true))
+      .checkpoint()
+
+    logger.info("Node geometries constructed.")
 
     val wayGeoms = ProcessOSM.reconstructWayGeometries(elements, nodes)
 
-    val relationGeoms = ProcessOSM.reconstructRelationGeometries(elements, wayGeoms)
+    logger.info("Way geometries constructed.")
+
+    val relationGeoms =
+      ProcessOSM.reconstructRelationGeometries(elements, nodeGeoms.union(wayGeoms))
+
+    logger.info("Relation geometries constructed.")
 
     nodeGeoms
+      .drop('geometryChanged)
       .union(wayGeoms.where(size('tags) > 0).drop('geometryChanged))
       .union(relationGeoms)
   }
@@ -274,8 +288,7 @@ object ProcessOSM {
     * @param _nodesToWays Optional lookup table.
     * @return Way geometries.
     */
-  def reconstructWayGeometries(_ways: DataFrame, _nodes: DataFrame, _nodesToWays: Option[DataFrame] = None)(implicit
-                                                                                                            cache: Caching = Caching.none, cachePartitions: Option[Int] = None): DataFrame = {
+  def reconstructWayGeometries(_ways: DataFrame, _nodes: DataFrame, _nodesToWays: Option[DataFrame] = None): DataFrame = {
     implicit val ss: SparkSession = _ways.sparkSession
     import ss.implicits._
     ss.withJTS
@@ -392,7 +405,7 @@ object ProcessOSM {
         'visible,
         'version,
         'minorVersion,
-        'geometryChanged)
+        'geometryChanged).checkpoint()
   }
 
   private def getRelationMembers(relations: DataFrame, geoms: DataFrame) = {
@@ -417,9 +430,8 @@ object ProcessOSM {
       .drop('validUntil)
       // re-calculate validUntil windows
       .withColumn("validUntil", lead('updated, 1) over idByVersion)
-      // TODO when expanding beyond relations referring to ways, geoms should include 'type for the join to work
-      // properly
-      .withColumn("type", lit(WayType))
+      // if no type column was provided, assume it's a way
+      .withColumn("type", coalesce('_type, lit(WayType)))
       .select('type, 'changeset, 'id, 'updated)
       .join(waysToRelations, Seq("id", "type"))
       .where(waysToRelations("timestamp") <= geoms("updated") and
@@ -468,22 +480,200 @@ object ProcessOSM {
     *
     * @param _relations DataFrame containing relations to reconstruct.
     * @param geoms      DataFrame containing way geometries to use in reconstruction.
-    * @return Relations geometries.
+    * @return Relation geometries.
     */
-  def reconstructRelationGeometries(_relations: DataFrame, geoms: DataFrame)(implicit cache: Caching = Caching.none,
-                                                                             cachePartitions: Option[Int] = None)
-  : DataFrame = {
+  def reconstructRelationGeometries(_relations: DataFrame, _geoms: DataFrame): DataFrame = {
+    val ss = _relations.sparkSession
+    import ss.implicits._
+    var geoms = _geoms
     val relations = preprocessRelations(_relations)
 
-    reconstructMultiPolygonRelationGeometries(relations, geoms)
-      .union(reconstructRouteRelationGeometries(relations, geoms))
+    // MultiPolygon reconstruction
+
+    var pending = relations.where(isMultiPolygon('tags) and containsMemberType('members, lit(RelationType)))
+    var next = relations
+      .where(isMultiPolygon('tags))
+      .join(pending.select('id), Seq("id"), "left_anti")
+    // TODO use case classes + ss.emptyDataSet[T]
+    var reconstructed: DataFrame = null
+    var relationGeoms: DataFrame = null
+
+    var pass = 0
+    do {
+      logger.info(s"Constructing MultiPolygons; pass #${pass + 1}")
+
+      if (reconstructed != null) {
+        reconstructed.unpersist()
+      }
+
+      // TODO this seems to get repeatedly invoked, despite the caching
+      reconstructed = reconstructMultiPolygonRelationGeometries(next, geoms).persist()
+      geoms = geoms.union(reconstructed.withColumn("geometryChanged", lit(true)))
+
+      next = next
+        .unpersist()
+        .join(reconstructed.select('id), Seq("id"), "left_anti")
+
+      if (pending != null) {
+        next = next.union(pending)
+        pending = null
+      }
+
+      if (relationGeoms == null) {
+        relationGeoms = reconstructed
+      } else {
+        relationGeoms = relationGeoms.union(reconstructed)
+      }
+
+      next = next.persist()
+      pass += 1
+
+      logger.info(s"Built ${reconstructed.count()} polygons.")
+    } while (next.count() > 0 && reconstructed.count() > 0)
+
+    next.unpersist()
+
+    // non-MultiPolygon reconstruction
+
+    pending = relations.where(!isMultiPolygon('tags) and containsMemberType('members, lit(RelationType)))
+    next = relations
+      .where(!isMultiPolygon('tags))
+      .join(pending.select('id), Seq("id"), "left_anti")
+
+    pass = 0
+    do {
+      logger.info(s"Constructing relations; pass #${pass + 1}")
+
+      reconstructed.unpersist()
+
+      reconstructed = constructRelationGeometries(next, geoms).persist()
+      geoms = geoms.union(reconstructed.withColumn("geometryChanged", lit(true)))
+      relationGeoms = relationGeoms.union(reconstructed)
+
+      next = next
+        .unpersist()
+        .join(reconstructed.select('id), Seq("id"), "left_anti")
+
+      if (pending != null) {
+        next = next.union(pending)
+        pending = null
+      }
+
+      next = next.persist()
+      pass += 1
+      logger.info(s"Built ${reconstructed.count()} relations.")
+    } while (next.count() > 0 && reconstructed.count() > 0)
+
+    reconstructed.unpersist()
+    next.unpersist()
+
+    relationGeoms.checkpoint()
+
+//    val multiPolygons = reconstructMultiPolygonRelationGeometries(relations, geoms).cache
+//
+//    multiPolygons.union(
+//      constructRelationGeometries(
+//        relations,
+//        geoms.union(multiPolygons.withColumn("geometryChanged", lit(true)))))
   }
 
-  def reconstructMultiPolygonRelationGeometries(_relations: DataFrame, geoms: DataFrame)(implicit cache: Caching =
-  Caching.none,
-                                                                                         cachePartitions: Option[Int]
-                                                                                         = None)
-  : DataFrame = {
+  /** Construct relation geometries by applying relation tags to all constituent geometries.
+    * Appropriate for all relation types except MultiPolygons (and boundaries, when MultiPolygons
+    * are desired).
+    *
+    * @param _relations Relations to construct.
+    * @param geoms Geometries to use when constructing relations.
+    * @return Relation geometries.
+    */
+  def constructRelationGeometries(_relations: DataFrame, geoms: DataFrame): DataFrame = {
+    implicit val ss: SparkSession = _relations.sparkSession
+    import ss.implicits._
+    ss.withJTS
+
+    val relations = preprocessRelations(_relations)
+      .where(!isMultiPolygon('tags))
+
+    // TODO does this handle multiple parts of member relations?
+    val members = getRelationMembers(relations, geoms)
+      .join(geoms.select('_type as 'type,
+                         'id as "ref",
+                         'updated as 'memberUpdated,
+                         'validUntil as 'memberValidUntil,
+                         'geom),
+            Seq("type", "ref"),
+            "left_outer")
+      .where(('memberUpdated.isNull and 'memberValidUntil.isNull and 'geom.isNull) or // allow left outer join artifacts
+        // through
+        ('memberUpdated <= 'updated and 'updated < coalesce('memberValidUntil, current_timestamp)))
+      .drop('memberUpdated)
+      .drop('memberValidUntil)
+
+    implicit val encoder: Encoder[Row] = TaggedVersionedElementEncoder
+
+    // leverage partitioning (avoids repeated (de-)serialization of merged coordinate arrays)
+    val relationGeoms = members
+      .groupByKey { row =>
+        (row.getAs[Long]("changeset"),
+         row.getAs[Long]("id"),
+         row.getAs[Integer]("version"),
+         row.getAs[Integer]("minorVersion"),
+         row.getAs[Timestamp]("updated"),
+         row.getAs[Timestamp]("validUntil"))
+      }
+      .flatMapGroups {
+        case ((changeset, id, version, minorVersion, updated, validUntil), rows) =>
+          val members = rows.toVector
+          val refs = members.map(_.getAs[Long]("ref"))
+          val types = members.map(_.getAs[Byte]("type"))
+          val roles = members.map(_.getAs[String]("role"))
+          val geoms = members.map(_.getAs[jts.Geometry]("geom"))
+
+          List(refs, types, roles, geoms).transpose.filter {
+            case List(_, _, _, geom) => Option(geom).isDefined
+          } map {
+              case List(ref, tpe, role, geom) =>
+                new GenericRowWithSchema(
+                  Array(
+                    changeset,
+                    id,
+                    // include ref to facilitate dissolving (to create topological boundaries)
+                    Map("osmesa:ref" -> ref.toString, "osmesa:ref_type" -> tpe.toString) ++ Option(role)
+                      .map(role => Map("role" -> role.toString))
+                      .getOrElse(Map.empty[String, String]),
+                    version,
+                    minorVersion,
+                    updated,
+                    validUntil,
+                    geom
+                  ),
+                  TaggedVersionedElementSchema
+                ): Row
+          }
+      }
+
+    // Join metadata to avoid passing it through exploded shuffles
+    relationGeoms
+      .join(relations.select('id, 'version, 'tags as 'originalTags, 'visible), Seq("id", "version"))
+      .select(
+        lit(RelationType) as '_type,
+        'id,
+        'geom,
+        // TODO use map_concat after Spark 2.4.0
+        mergeTags('originalTags, 'tags) as 'tags,
+        'changeset,
+        'updated,
+        'validUntil,
+        'visible,
+        'version,
+        'minorVersion)
+
+    // TODO dissolve to create shared boundaries with Map[Long, Map[String, String]] to look up which tags belong to which relation
+    // shared boundaries are not really appendable
+
+    // TODO provide an option to also create polygonal boundaries (using multipolygon construction)
+  }
+
+  def reconstructMultiPolygonRelationGeometries(_relations: DataFrame, geoms: DataFrame): DataFrame = {
     implicit val ss: SparkSession = _relations.sparkSession
     import ss.implicits._
     ss.withJTS

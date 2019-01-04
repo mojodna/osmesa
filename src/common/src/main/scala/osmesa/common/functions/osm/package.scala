@@ -1,13 +1,10 @@
 package osmesa.common.functions
 
-import org.apache.log4j.Logger
-import org.apache.spark.sql.Row
 import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.functions.udf
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.{Column, Row}
 import osmesa.common.ProcessOSM._
-
-import com.vividsolutions.jts.geom.prep.PreparedGeometryFactory
 
 package object osm {
   // Using tag listings from [id-area-keys](https://github.com/osmlab/id-area-keys) @ v2.8.0.
@@ -118,7 +115,7 @@ package object osm {
     )
   )
 
-  private val MultiPolygonTypes = Set("multipolygon", "boundary")
+  private val MultiPolygonTypes = Set("multipolygon")
 
   private val BooleanValues = Set("yes", "no", "true", "false", "1", "0")
 
@@ -133,8 +130,6 @@ package object osm {
 
   private val HashtagMatcher = """#([^\u2000-\u206F\u2E00-\u2E7F\s\\'!"#$%()*,.\/;<=>?@\[\]^{|}~]+)""".r
 
-  private lazy val logger = Logger.getLogger(getClass)
-
   private val _isArea = (tags: Map[String, String]) =>
     tags match {
       case _ if tags.contains("area") && BooleanValues.contains(tags("area").toLowerCase) =>
@@ -148,12 +143,16 @@ package object osm {
   val isArea: UserDefinedFunction = udf(_isArea)
 
   private val _isMultiPolygon = (tags: Map[String, String]) =>
-    tags.contains("type") && MultiPolygonTypes.contains(tags("type").toLowerCase)
+    tags != null && tags.contains("type") && MultiPolygonTypes.contains(tags("type").toLowerCase)
 
+  // TODO use element_at after Spark 2.4
   val isMultiPolygon: UserDefinedFunction = udf(_isMultiPolygon)
 
-  val isNew: UserDefinedFunction = udf { (version: Int, minorVersion: Int) =>
-    version == 1 && minorVersion == 0
+  def isNew(version: Column, minorVersion: Column): Column = version === 1 && minorVersion === 0
+
+  // TODO use element_at after Spark 2.4
+  val isBoundary: UserDefinedFunction = udf { tags: Map[String, String] =>
+    tags.contains("type") && tags("type") == "boundary"
   }
 
   val isRoute: UserDefinedFunction = udf { tags: Map[String, String] =>
@@ -214,8 +213,14 @@ package object osm {
     tags: Map[String, String] => WaterwayValues.contains(tags.getOrElse("waterway", null))
   }
 
-
   def mergeTags: UserDefinedFunction = udf {
     (_: Map[String, String]) ++ (_: Map[String, String])
   }
+
+  private val _containsMemberType = (members: Seq[Row], `type`: Byte) =>
+    members.exists { row =>
+      row.getAs[Byte]("type") == `type`
+    }
+
+  val containsMemberType: UserDefinedFunction = udf(_containsMemberType)
 }
